@@ -1,0 +1,37 @@
+name: source-health
+# Weekly: is every pinned source still reachable AND still matching its hash?
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Verify every source of every component
+        id: check
+        run: |
+          set +e
+          python3 scripts/fetch_source.py --retries 2 --backoff 3 check \
+            --report-md source-health.md --report-json source-health.json
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+          cat source-health.md >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-health-report
+          path: |
+            source-health.md
+            source-health.json
+      - name: Fail if some component has NO working source (a single dead mirror only shows in the report)
+        if: steps.check.outputs.rc != '0'
+        run: |
+          echo "At least one component has no verifiable source. See the report." >&2
+          exit 1

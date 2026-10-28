@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Unit tests (fetch script, fallback behaviour against a local failing server)
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Manifest sanity
+        run: python3 scripts/fetch_source.py list
+      - name: "Auto-merge gate scenarios (fake gh - when is an update merged, when not)"
+        run: scripts/tests/test_gate_update.sh
+      - name: "Auto-release scenarios (fake gh and local git - when is a release created, when not)"
+        run: scripts/tests/test_release_update.sh
+      - name: shellcheck
+        run: shellcheck -x -S warning scripts/build/*.sh scripts/smoke/*.sh scripts/ci/*.sh scripts/tests/*.sh scripts/tests/fakebin/gh

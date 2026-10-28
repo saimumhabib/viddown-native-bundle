@@ -1,0 +1,179 @@
+name: update-sources
+# Finds newer upstream versions, computes hashes, opens a pull request, BUILDS it, and (only when
+# every safety condition holds and auto-merge is enabled) merges it. Otherwise the PR stays open
+# and a comment explains why, so a person decides.
+#
+# Switches (default = SAFE: never merge by itself):
+#   auto-merge  scheduled runs: repository variable AUTO_MERGE_SOURCES == "true"
+#               manual runs   : the "auto_merge" input of "Run workflow"
+#   auto-release (only after an automatic merge; ON by default)
+#               scheduled runs: repository variable AUTO_RELEASE_SOURCES == "false" turns it OFF
+#               manual runs   : the "auto_release" input
+# Variables live in Settings > Secrets and variables > Actions > Variables.
+on:
+  schedule:
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      auto_merge:
+        description: "Merge automatically if the build, the emulator smoke test and every safety check pass"
+        type: boolean
+        default: false
+      auto_release:
+        description: "After an automatic merge, publish a GitHub Release from the already-built files"
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: update-sources
+  cancel-in-progress: false
+jobs:
+  propose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the only dependency of the update helper
+        run: python3 -m pip install "packaging==26.0"
+      - name: Show what is available upstream
+        run: python3 scripts/update_source.py discover
+      - name: Compute new pins (also fills sources that could not be reached from elsewhere)
+        run: python3 scripts/update_source.py pin --latest --write --summary-md pr-body.md
+      - id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          branch: auto/update-sources
+          title: "Update upstream sources (yt-dlp / CPython / FFmpeg / ...)"
+          commit-message: "native: update sources.lock.toml (proposed by update-sources workflow)"
+          body-path: pr-body.md
+          add-paths: native/sources.lock.toml
+      - id: resolve
+        name: Find the PR to build (new, updated, or an older one that is still open)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATED: ${{ steps.pr.outputs.pull-request-number }}
+        run: |
+          n="$CREATED"
+          if [ -z "$n" ]; then
+            n="$(gh pr list --repo "$GITHUB_REPOSITORY" --head auto/update-sources --state open --json number --jq '.[0].number // empty')"
+          fi
+          echo "pr_number=$n" >> "$GITHUB_OUTPUT"
+          if [ -n "$n" ]; then
+            echo "head_sha=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)" >> "$GITHUB_OUTPUT"
+            echo "Building PR #$n"
+          else
+            echo "Nothing to propose: sources are up to date."
+          fi
+      - id: tag
+        name: Pick the tag this build would be released under (native-vYYYY.MM.DD, then .2, .3 ...)
+        run: |
+          base="native-v$(date -u +%Y.%m.%d)"; tag="$base"; i=1
+          while git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; do
+            i=$((i + 1)); tag="$base.$i"
+          done
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag"
+
+  build:
+    name: build the proposed update
+    needs: propose
+    if: needs.propose.outputs.pr_number != ''
+    permissions:
+      contents: write   # the called workflow has a tag-only release job that asks for it
+    uses: ./.github/workflows/build-native.yml
+    with:
+      ref: ${{ needs.propose.outputs.head_sha }}
+      version_tag: ${{ needs.propose.outputs.release_tag }}
+
+  gate:
+    name: safety gate, then merge or explain
+    needs: [propose, build]
+    if: ${{ always() && needs.propose.outputs.pr_number != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    outputs:
+      merged: ${{ steps.decide.outputs.merged }}
+      merge_sha: ${{ steps.decide.outputs.merge_sha }}
+      release: ${{ steps.switches.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.propose.outputs.head_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - id: tests
+        name: Unit tests and manifest sanity on the PR commit
+        continue-on-error: true
+        run: |
+          python3 -m unittest discover -s scripts/tests
+          python3 scripts/fetch_source.py list
+      - id: switches
+        name: Release switch
+        env:
+          AUTO_RELEASE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.auto_release) || format('{0}', vars.AUTO_RELEASE_SOURCES != 'false') }}
+        run: echo "release=$AUTO_RELEASE" >> "$GITHUB_OUTPUT"
+      - id: decide
+        name: Decide, then merge or comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.propose.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.propose.outputs.head_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          AUTO_MERGE: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.auto_merge) || format('{0}', vars.AUTO_MERGE_SOURCES == 'true') }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/ci/gate_update.sh
+
+  release:
+    name: publish the release
+    needs: [propose, build, gate]
+    if: ${{ needs.gate.outputs.merged == 'true' && needs.gate.outputs.release == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.merge_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: The files that were already built and smoke-tested
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: viddown-native-*
+          path: release-assets
+          merge-multiple: true
+      - name: Release (only if the merged code is exactly the code that was built)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.propose.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.propose.outputs.head_sha }}
+          MERGE_SHA: ${{ needs.gate.outputs.merge_sha }}
+          TAG: ${{ needs.propose.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ASSETS_DIR: release-assets
+        run: scripts/ci/release_update.sh

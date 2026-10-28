@@ -1,0 +1,128 @@
+VIDDOWN-NATIVE-BUNDLE  -  PROGRESS
+Last updated: 2026-10-27 (fixed: update_source.py failed when all pins already existed; .gitignore hid scripts/build; shellcheck warnings)
+Rule: nothing below is marked Done unless it was actually run. "Written" means it exists but has not been run.
+
+PHASE 1 (feasibility + from-source proof of concept) - NATIVE BUNDLE REPO PART
+Status: IN PROGRESS  (exit criteria NOT met: no Android cross-build has run yet)
+
+DONE (verified by running it here)
+ - fetch_source.py: ordered fallback, sha256/sha256_uncompressed/commit pins, retries/backoff, cache re-verify,
+   source-health check. 24 unit tests pass against a local failing server (+7 for update_source.py) (refused, 404, 500, timeout,
+   truncated, wrong checksum, tampered cache, moved/mismatched commit, unpinned skip, all-fail message + exit code 2).
+ - update_source.py: discovered real latest versions; pinned 13 components against real upstreams;
+   dependency versions derived from yt-dlp's own "pin" extra and CPython's Android/android.py.
+ - fetch-all against the real lock: all 13 components verified; fallback observed for real
+   (unpinned #1 skipped, unreachable git.ffmpeg.org -> next source).
+ - yt-dlp 2026.10.21 + pure-Python deps assembled and imported on host Python (1754 extractors load).
+ - Vendored OpenSSL/libffi patches dry-run applied to the pinned sources.
+ - FFmpeg configure component names validated against FFmpeg 8.1.3 source.
+ - package.py run with real provenance (BUILD_INFO, notices, licence files, SHA256SUMS).
+ - Workflow YAML parses; all actions pinned to commit SHAs.
+
+WRITTEN, NOT YET RUN (needs GitHub Actions + Android NDK)
+ - build_python.sh (OpenSSL + libffi + CPython per ABI + launcher), build_ffmpeg.sh,
+   build-native.yml, emulator smoke test (android_smoke.sh), source-health.yml, update-sources.yml.
+
+FINDINGS THAT CHANGE THE PLAN
+ 1. CPython's own android.py downloads PREBUILT OpenSSL/libffi/bzip2/xz/zstd/sqlite from a third party
+    (beeware/cpython-android-source-deps releases). That violates the from-source rule.
+    Decision: build OpenSSL + libffi from source ourselves (using that project's published patches,
+    vendored with provenance) and pre-create the prefix so android.py skips the download.
+    bzip2/xz/zstd/sqlite are NOT built (yt-dlp does not need them).
+ 2. yt-dlp now needs an external JavaScript runtime for some sites (yt-dlp-ejs). NOT solved yet.
+    Candidate: QuickJS from source. Decision needed (Phase 7).
+ 3. brotli and pycryptodomex need native compilation: deferred.
+ 4. CPython's own CI covers only arm64-v8a and x86_64; armeabi-v7a/x86 are experimental in the matrix.
+ 5. python.org, ffmpeg.org, openssl.org, git.ffmpeg.org, sourceware.org are unreachable from the dev
+    sandbox: those source entries are UNPINNED until the update-sources workflow pins them from Actions.
+ 6. The Android SDK/NDK is a Google-provided toolchain (not shipped): documented exception.
+
+DECISIONS (by Saimum)
+ - New project, package com.viddown.app. Separate native bundle repo that builds tools from source and
+   checks for updates; app repo consumes its artifacts. License GPLv3. Ask before each phase.
+ - Update flow: scheduled workflow proposes a PR (new version + hashes) and builds it; Saimum merges.
+
+FIRST CI RUN (2026-10-27) - RESULT AND FIX
+ - All ABIs failed in build_python.sh at 'cross-build/build' configure: "cannot run C compiled programs".
+   Cause (my bug): android-env.sh was sourced in the top-level shell, so CPython's BUILD-machine Python
+   (which must run natively) was configured with the Android cross clang. The clang message
+   "-print-multi-os-directory" is a harmless probe warning, not the cause.
+   Fix: top-level shell stays clean (cross variables are unset); every step that needs the NDK toolchain
+   loads android-env.sh in its own subshell; configure-build/make-build run first in the clean env.
+   Verified here: `android.py configure-build` on the pinned CPython 3.14.10 source in a clean env succeeds
+   (gcc, "cross compiling... no"). make-build was started but not waited out (slow sandbox): NOT verified.
+ - Still unverified: OpenSSL/libffi/CPython host steps, FFmpeg, packaging of real outputs, smoke test.
+
+SECOND CI RUN (2026-10-27) - PROGRESS AND FIX
+ - Got through OpenSSL/libffi/CPython cross-build (x86_64 at least) up to the final staging step of
+   build_python.sh. Failed there: GNU tar needs --exclude BEFORE the path argument (my bug).
+   Fix applied; verified here on a fake prefix (new order OK and excludes right dirs; old order
+   reproduces the exact CI error).
+ - Also verified here on host, with the real pinned FFmpeg 8.1.3 source and the exact minimal component
+   list: configure OK (License: LGPL 2.1 or later; CONFIG_GPL/NONFREE/VERSION3 = 0), build OK,
+   wav->aac encode OK, stream-copy split+merge OK, ffprobe reads duration. NOT yet verified: the
+   Android cross-build flags of FFmpeg (needs the NDK).
+
+THIRD CI RUN (2026-10-27) - RESULT AND FIX
+ - Build + packaging succeeded for arm64-v8a, armeabi-v7a and x86 (zip artifacts 14.7 / 13.7 / 15.5 MB were
+   uploaded, seen on the public Actions page; logs need sign-in so contents were NOT inspected).
+   So the Android cross-builds of OpenSSL/libffi/CPython/FFmpeg ran to the end for those ABIs.
+ - x86_64 failed in the emulator smoke test: "Failed to import encodings module". Cause (my bug): the smoke
+   script unzipped the stdlib zip into <home>, but Python expects <home>/lib/python3.14/. Reproduced here
+   with a real Python (old layout aborts, new layout works). Fixed in android_smoke.sh; layout documented.
+ - Also hardened the smoke script: stderr no longer merged into stdout (old linkers print harmless
+   'unsupported flags DT_FLAGS_1' warnings), cancel test uses ps/kill by PID with an API-24 fallback.
+   These two are UNVERIFIED (need the emulator).
+ - Still unverified: that python/ssl/yt-dlp/ffmpeg actually run on the emulator; arm64/arm/x86 runtime.
+
+FOURTH CI RUN (2026-10-27) - RESULT AND FIX
+ - x86_64 emulator smoke test reached the yt-dlp download step. The FAIL lines reported were: download,
+   merge, cancel, plus "/system/bin/sh: syntax error: '(' unexpected". Cause (my bug): two commands sent via
+   `adb shell` contained an unquoted `%(ext)s`; the device shell parses the string and rejects "(".
+   The merge and cancel FAILs were consequences (no dl.mp4 to merge, the background yt-dlp never started).
+   Fix: literal -o file names (dl.mp4, slow.bin). Verified on host with real yt-dlp 2026.10.21: download
+   writes the file, -J returns formats, kill-by-PID cancel logic works.
+ - The FAIL list did not include the python/ssl, yt-dlp --version, ffmpeg/ffprobe start or `-J` checks;
+   they probably passed, but the PASS lines were not seen, so this is NOT confirmed.
+ - Checked and ruled out: HEAD on the slow fixture returns 404, but yt-dlp still starts the GET download.
+
+AUTO-UPDATE PIPELINE (2026-10-27) - requested by Saimum: automate update -> build -> merge, keep manual option
+ - update-sources.yml now: propose (PR) -> build (build-native via workflow_call, exact PR commit) -> gate.
+   Gate merges only if: required artifacts (arm64-v8a, x86_64 = after emulator smoke tests) exist, unit tests
+   pass, check_lock_update.py policy passes, PR head unchanged. Else it comments the reasons on the PR.
+ - Switch: scheduled -> repo variable AUTO_MERGE_SOURCES=true ; manual -> 'auto_merge' input. Default: never merge.
+ - VERIFIED here: 14 policy tests; gate script in 10 scenarios with a fake gh (merge, missing artifact,
+   cancelled, moved branch, auto-merge off, tests failed, merge refused, tampered hash); shellcheck; actionlint
+   on all 4 workflows (it caught a YAML error in ci.yml, fixed).
+ - NOT verified (needs GitHub): the reusable-workflow call and its permissions, create-pull-request outputs for an
+   already-open PR, `needs.build.result` semantics with continue-on-error jobs (gate is written to tolerate
+   either), the real merge, branch-protection interaction.
+ - RECOMMENDATION: leave AUTO_MERGE_SOURCES unset until the x86_64 smoke test has passed once end to end.
+
+AUTO-RELEASE (2026-10-27) - requested by Saimum: release should also happen by itself after an auto update
+ - update-sources.yml gained: tag selection (native-vYYYY.MM.DD[.N]) in 'propose', the build is labelled with it,
+   'gate' exposes merge_sha + a release switch, new 'release' job -> scripts/ci/release_update.sh.
+ - Design: a tag made with GITHUB_TOKEN does not start other workflows, so the release is made inside this workflow
+   and PUBLISHES THE ALREADY-BUILT, SMOKE-TESTED FILES (no second build). Honest condition: it checks that the merged
+   commit's git tree == the built PR commit's tree; otherwise it does not release and comments on the PR.
+ - Switch: AUTO_RELEASE_SOURCES=false (scheduled) / auto_release input (manual); only after an automatic merge.
+ - VERIFIED here: release_update.sh in 4 scenarios with real git repos + fake gh (same tree -> release pinned to the
+   merge commit with SHA256SUMS and no stale .sha256; main moved -> none; x86_64 zip missing -> none; unknown merge
+   sha -> none); release_notes.py (2 tests); shellcheck; actionlint.
+ - NOT verified (needs GitHub): that `gh release create --target <sha>` with the workflow token works in this repo,
+   that it does not trigger the tag workflow, download-artifact of artifacts produced by the reusable workflow.
+
+KNOWN ISSUES / RISKS
+ - Cross-build scripts are unverified; expect fixes after the first CI run.
+ - libffi/_ctypes pickup and the exact set of produced extension modules are unverified.
+ - arm64-v8a binaries cannot be run-tested on the x86_64 CI emulator.
+ - Source order uses unpinned primaries for 3 components until pinned.
+
+NEXT STEP (needs Saimum)
+ 1. Create the GitHub repo (e.g. saimum10/viddown-native-bundle) and push these files.
+ 2. Run workflow "update-sources" once (fills UNPINNED hashes, opens a PR), merge it.
+ 3. Run workflow "build-native"; send me the logs of any failure; I fix and we repeat until at least
+    x86_64 passes the smoke test.
+ 4. Only then: Phase 1 PoC app (instrumented test of exec from nativeLibraryDir) in the app repo.
+
+NOT STARTED: Phases 2-10 (app repo).

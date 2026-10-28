@@ -1,0 +1,182 @@
+# Policy file: WHERE each component may come from (ordered, official hosts only)
+# and HOW new versions are discovered. Hashes are NOT stored here: they are
+# computed by scripts/update_source.py and written to native/sources.lock.toml.
+#
+# Fields
+#   track          version discovery. kind = "git-tags": `pattern` is a regex with ONE
+#                  capture group = the version, matched against tag names of `repo`.
+#   follow         version is derived from another component:
+#                    "yt-dlp-pin"           -> yt-dlp's own tested `pin` extra
+#                    "cpython-android-deps" -> the dependency list in CPython's Android/android.py
+#   tag            tag template ({version}); commit_repo is used to resolve the tag's commit.
+#   sources        ordered list; {version} and {tag} are substituted.
+#     type tarball    url, pin = which hashes to record ("sha256" | "sha256_uncompressed")
+#     type pypi-sdist project (resolved through the PyPI JSON API; recorded as a tarball)
+#     type git        url, ref
+#     verify_with     optional upstream-published checksum file used as a cross-check
+
+[policy]
+python_series = "3.14"
+note = "Only official project hosts or documented official mirrors. Never random third-party sites."
+
+# ------------------------------------------------------------------ tools
+[components.cpython]
+kind = "native-runtime"
+license = "PSF-2.0"
+track = { kind = "git-tags", repo = "https://github.com/python/cpython", pattern = '^v(3\.14\.\d+)$' }
+tag = "v{version}"
+commit_repo = "https://github.com/python/cpython"
+sources = [
+  { name = "python-org", type = "tarball", url = "https://www.python.org/ftp/python/{version}/Python-{version}.tar.xz", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/python/cpython/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+  { name = "github-git", type = "git", url = "https://github.com/python/cpython", ref = "{tag}" },
+]
+
+[components.yt-dlp]
+kind = "python-source"
+license = "Unlicense"
+track = { kind = "git-tags", repo = "https://github.com/yt-dlp/yt-dlp", pattern = '^(\d{4}\.\d{2}\.\d{2})$' }
+tag = "{version}"
+commit_repo = "https://github.com/yt-dlp/yt-dlp"
+sources = [
+  { name = "github-tag", type = "tarball", url = "https://github.com/yt-dlp/yt-dlp/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+  { name = "pypi-sdist", type = "pypi-sdist", project = "yt-dlp", pin = ["sha256"] },
+  { name = "github-release-asset", type = "tarball", url = "https://github.com/yt-dlp/yt-dlp/releases/download/{tag}/yt-dlp.tar.gz", pin = ["sha256"], verify_with = { url = "https://github.com/yt-dlp/yt-dlp/releases/download/{tag}/SHA2-256SUMS", file = "yt-dlp.tar.gz" } },
+]
+
+[components.ffmpeg]
+kind = "native-tool"
+license = "LGPL-2.1-or-later (as configured here; no --enable-gpl)"
+track = { kind = "git-tags", repo = "https://github.com/FFmpeg/FFmpeg", pattern = '^n(8\.1\.\d+)$' }
+tag = "n{version}"
+commit_repo = "https://github.com/FFmpeg/FFmpeg"
+sources = [
+  { name = "ffmpeg-org-release", type = "tarball", url = "https://ffmpeg.org/releases/ffmpeg-{version}.tar.xz", pin = ["sha256"] },
+  { name = "ffmpeg-org-git", type = "git", url = "https://git.ffmpeg.org/ffmpeg.git", ref = "{tag}" },
+  { name = "github-mirror-tag", type = "tarball", url = "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+# ------------------------------------------------------------------ C libraries CPython needs
+# CPython's own Android/android.py downloads PREBUILT binaries of these from a third party.
+# VidDown builds them from source instead (see scripts/build/build_deps.sh).
+[components.openssl]
+kind = "native-lib"
+license = "Apache-2.0"
+follow = "cpython-android-deps"
+tag = "openssl-{version}"
+commit_repo = "https://github.com/openssl/openssl"
+sources = [
+  { name = "openssl-org", type = "tarball", url = "https://www.openssl.org/source/openssl-{version}.tar.gz", pin = ["sha256"] },
+  { name = "github-release-asset", type = "tarball", url = "https://github.com/openssl/openssl/releases/download/{tag}/openssl-{version}.tar.gz", pin = ["sha256"], verify_with = { url = "https://github.com/openssl/openssl/releases/download/{tag}/openssl-{version}.tar.gz.sha256", file = "openssl-{version}.tar.gz" } },
+  { name = "github-tag", type = "tarball", url = "https://github.com/openssl/openssl/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.libffi]
+kind = "native-lib"
+license = "MIT"
+follow = "cpython-android-deps"
+tag = "v{version}"
+commit_repo = "https://github.com/libffi/libffi"
+sources = [
+  { name = "github-release-asset", type = "tarball", url = "https://github.com/libffi/libffi/releases/download/{tag}/libffi-{version}.tar.gz", pin = ["sha256"] },
+  { name = "github-git", type = "git", url = "https://github.com/libffi/libffi", ref = "{tag}" },
+]
+
+# ------------------------------------------------------------------ yt-dlp's pure-Python dependencies
+# Versions follow yt-dlp's own tested `pin` extra. brotli and pycryptodomex need native
+# compilation and are deferred (yt-dlp works without them; see docs/architecture.md).
+[components.py-certifi]
+kind = "python-pure"
+pypi = "certifi"
+license = "MPL-2.0"
+follow = "yt-dlp-pin"
+tag = "{version}"
+commit_repo = "https://github.com/certifi/python-certifi"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "certifi", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/certifi/python-certifi/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-idna]
+kind = "python-pure"
+pypi = "idna"
+license = "BSD-3-Clause"
+follow = "yt-dlp-pin"
+tag = "v{version}"
+commit_repo = "https://github.com/kjd/idna"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "idna", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/kjd/idna/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-urllib3]
+kind = "python-pure"
+pypi = "urllib3"
+license = "MIT"
+follow = "yt-dlp-pin"
+tag = "{version}"
+commit_repo = "https://github.com/urllib3/urllib3"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "urllib3", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/urllib3/urllib3/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-requests]
+kind = "python-pure"
+pypi = "requests"
+license = "Apache-2.0"
+follow = "yt-dlp-pin"
+tag = "v{version}"
+commit_repo = "https://github.com/psf/requests"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "requests", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/psf/requests/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-charset-normalizer]
+kind = "python-pure"
+pypi = "charset-normalizer"
+license = "MIT"
+follow = "yt-dlp-pin"
+tag = "{version}"
+commit_repo = "https://github.com/jawah/charset_normalizer"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "charset-normalizer", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/jawah/charset_normalizer/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-mutagen]
+kind = "python-pure"
+pypi = "mutagen"
+license = "GPL-2.0-or-later"
+follow = "yt-dlp-pin"
+tag = "release-{version}"
+commit_repo = "https://github.com/quodlibet/mutagen"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "mutagen", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/quodlibet/mutagen/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-websockets]
+kind = "python-pure"
+pypi = "websockets"
+license = "BSD-3-Clause"
+follow = "yt-dlp-pin"
+tag = "{version}"
+commit_repo = "https://github.com/python-websockets/websockets"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "websockets", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/python-websockets/websockets/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]
+
+[components.py-yt-dlp-ejs]
+kind = "python-pure"
+pypi = "yt-dlp-ejs"
+license = "Unlicense"
+follow = "yt-dlp-pin"
+tag = "{version}"
+commit_repo = "https://github.com/yt-dlp/ejs"
+sources = [
+  { name = "pypi-sdist", type = "pypi-sdist", project = "yt-dlp-ejs", pin = ["sha256"] },
+  { name = "github-tag", type = "tarball", url = "https://github.com/yt-dlp/ejs/archive/refs/tags/{tag}.tar.gz", pin = ["sha256_uncompressed"] },
+]

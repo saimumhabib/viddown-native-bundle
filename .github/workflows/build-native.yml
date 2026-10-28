@@ -1,0 +1,163 @@
+name: build-native
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Label put in artifact names / BUILD_INFO.json"
+        default: "dev"
+      ref:
+        description: "Commit or branch to build (empty = the branch you run this from)"
+        default: ""
+  # Called by update-sources.yml to build a proposed update before it may be merged.
+  workflow_call:
+    inputs:
+      version_tag:
+        type: string
+        default: "dev"
+      ref:
+        type: string
+        default: ""
+  push:
+    tags: ["native-v*"]
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "native/**"
+      - "patches/**"
+      - ".github/workflows/build-native.yml"
+permissions:
+  contents: read
+concurrency:
+  group: build-native-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+env:
+  VERSION_TAG: ${{ inputs.version_tag || github.ref_name }}
+jobs:
+  packages:
+    name: yt-dlp + pure-Python dependencies
+    # auto/update-sources is built by update-sources.yml (workflow_call); do not build it twice
+    if: github.event_name != 'pull_request' || github.head_ref != 'auto/update-sources'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/sources
+          key: sources-${{ hashFiles('native/sources.lock.toml') }}
+          restore-keys: sources-
+      - run: scripts/build/build_python_packages.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shared-python-packages
+          path: dist/shared
+          if-no-files-found: error
+
+  build:
+    name: native (${{ matrix.abi }})
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a,   experimental: false }
+          - { abi: x86_64,      experimental: false }
+          # CPython's android.py lists these hosts, but its own CI does not cover them.
+          # They are built and reported, but never claimed as supported until they pass.
+          - { abi: armeabi-v7a, experimental: true }
+          - { abi: x86,         experimental: true }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build prerequisites (host Python for the cross-build + autotools for libffi)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential zip unzip patch autoconf automake libtool pkg-config \
+            libssl-dev zlib1g-dev libffi-dev libbz2-dev liblzma-dev libsqlite3-dev libreadline-dev uuid-dev
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/sources
+          key: sources-${{ hashFiles('native/sources.lock.toml') }}
+          restore-keys: sources-
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: shared-python-packages
+          path: dist/shared
+      - name: CPython + OpenSSL + libffi from source
+        run: scripts/build/build_python.sh ${{ matrix.abi }}
+      - name: FFmpeg + FFprobe from source (LGPL, minimal)
+        run: scripts/build/build_ffmpeg.sh ${{ matrix.abi }}
+      - name: Package with provenance
+        run: python3 scripts/package.py ${{ matrix.abi }} --version-tag "$VERSION_TAG"
+      - name: Emulator smoke test needs a host ffmpeg only to GENERATE test media
+        if: matrix.abi == 'x86_64'
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Smoke test on emulator, API 24 (the minimum we build for)
+        if: matrix.abi == 'x86_64'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 24
+          arch: x86_64
+          script: bash scripts/smoke/android_smoke.sh x86_64 "$(ls dist/release/viddown-native-x86_64-*.zip)"
+      - name: Smoke test on emulator, API 34
+        if: matrix.abi == 'x86_64'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          script: bash scripts/smoke/android_smoke.sh x86_64 "$(ls dist/release/viddown-native-x86_64-*.zip)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: viddown-native-${{ matrix.abi }}
+          path: dist/release/*
+          if-no-files-found: error
+      - name: Keep build logs when something failed
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-logs-${{ matrix.abi }}
+          path: |
+            build/work/*/ffmpeg-build/ffbuild/config.log
+            build/work/*/cpython/cross-build/*/config.log
+            build/work/*/openssl/*.log
+          if-no-files-found: ignore
+
+  release:
+    name: GitHub release (only for native-v* tags)
+    if: startsWith(github.ref, 'refs/tags/native-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: viddown-native-*
+          path: release
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release
+        run: sha256sum viddown-native-*.zip > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" release/* --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "Native bundle built from source in GitHub Actions. Every zip contains BUILD_INFO.json (source actually used + verified hashes per component). ABIs listed as verified in the README are the only ones claimed to work."

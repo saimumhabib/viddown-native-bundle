@@ -1,0 +1,6 @@
+# anchored with a leading slash: an unanchored "build/" would also hide scripts/build/
+/build/
+/dist/
+/.cache/
+__pycache__/
+*.pyc

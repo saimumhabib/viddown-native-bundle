@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+echo "gh $*" >> "$FAKE_LOG"
+case "$1 $2" in
+  "api --paginate") for n in $FAKE_ARTIFACTS; do echo "$n"; done ;;
+  "pr view") case "$*" in *mergeCommit*) echo "${FAKE_MERGE_SHA:-}" ;; *) echo "$FAKE_HEAD" ;; esac ;;
+  "pr merge") if [ "${FAKE_MERGE_RC:-0}" != 0 ]; then echo "merge refused: review required" >&2; exit 1; fi ;;
+  "release create") while [ $# -gt 0 ]; do [ "$1" = "--notes-file" ] && cp "$2" "$FAKE_NOTES"; shift; done ;;
+  "pr comment") while [ $# -gt 0 ]; do
+      [ "$1" = "--body-file" ] && cp "$2" "$FAKE_COMMENT"
+      [ "$1" = "--body" ] && printf '%s\n' "$2" > "$FAKE_COMMENT"
+      shift
+    done ;;
+esac
